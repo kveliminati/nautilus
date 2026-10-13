@@ -77,6 +77,9 @@ typedef enum
 /* Which text attributes appear beneath icon names */
 #define NAUTILUS_PREFERENCES_ICON_VIEW_CAPTIONS				"captions"
 
+/* Whether the grid view uses the compact, column-major layout */
+#define NAUTILUS_PREFERENCES_ICON_VIEW_COMPACT_LAYOUT			"compact-layout"
+
 /* List View */
 #define NAUTILUS_PREFERENCES_LIST_VIEW_DEFAULT_ZOOM_LEVEL		"default-zoom-level"
 #define NAUTILUS_PREFERENCES_LIST_VIEW_DEFAULT_VISIBLE_COLUMNS		"default-visible-columns"

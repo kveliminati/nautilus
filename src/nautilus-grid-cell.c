@@ -27,11 +27,15 @@ struct _NautilusGridCell
     GtkWidget *icon;
     GtkWidget *emblems_box;
     GtkWidget *labels_box;
+    GtkWidget *label;
     GtkWidget *first_caption;
     GtkWidget *second_caption;
     GtkWidget *third_caption;
 
     gboolean in_file_change;
+
+    /* Small icon with the name beside it, instead of below it. */
+    gboolean compact;
 };
 
 G_DEFINE_TYPE (NautilusGridCell, nautilus_grid_cell, NAUTILUS_TYPE_VIEW_CELL)
@@ -111,7 +115,7 @@ update_captions (NautilusGridCell *self)
         GQuark attribute_q = self->caption_attributes[i];
         gboolean show_caption;
 
-        show_caption = (attribute_q != 0);
+        show_caption = (attribute_q != 0 && !self->compact);
         gtk_widget_set_visible (caption_labels[i], show_caption);
         if (show_caption)
         {
@@ -248,6 +252,73 @@ nautilus_grid_cell_dispose (GObject *object)
 
 #define EMBLEMS_BOX_WIDTH 18
 #define VERTICAL_PADDING 6
+#define COMPACT_SPACING 6
+
+static void
+compact_measure (NautilusGridCell *self,
+                 GtkOrientation    orientation,
+                 int               for_size,
+                 int              *minimum,
+                 int              *natural)
+{
+    guint icon_size;
+    int labels_min, labels_nat, emblems_min, emblems_nat;
+
+    g_object_get (self, "icon-size", &icon_size, NULL);
+
+    gtk_widget_measure (self->emblems_box, orientation, -1,
+                        &emblems_min, &emblems_nat, NULL, NULL);
+
+    if (orientation == GTK_ORIENTATION_HORIZONTAL)
+    {
+        gtk_widget_measure (self->labels_box, orientation, -1,
+                            &labels_min, &labels_nat, NULL, NULL);
+        /* GtkGridView sizes columns from the items' minimum width, so ask
+         * for the whole name; the label's max-width-chars caps long ones. */
+        *minimum = *natural = icon_size + COMPACT_SPACING + labels_nat + emblems_nat;
+    }
+    else /* GTK_ORIENTATION_VERTICAL */
+    {
+        gtk_widget_measure (self->labels_box, orientation, -1,
+                            &labels_min, &labels_nat, NULL, NULL);
+        *minimum = MAX ((int) icon_size, MAX (labels_min, emblems_min));
+        *natural = MAX ((int) icon_size, MAX (labels_nat, emblems_nat));
+    }
+}
+
+static void
+compact_size_allocate (NautilusGridCell *self,
+                       int               width,
+                       int               height)
+{
+    GtkAllocation icon_allocation, emblems_allocation, labels_allocation;
+    gboolean ltr = gtk_widget_get_direction (GTK_WIDGET (self)) == GTK_TEXT_DIR_LTR;
+    guint size;
+    int icon_size, emblems_width;
+
+    g_object_get (self, "icon-size", &size, NULL);
+    icon_size = size;
+    gtk_widget_measure (self->emblems_box, GTK_ORIENTATION_HORIZONTAL, -1,
+                        NULL, &emblems_width, NULL, NULL);
+
+    /* [icon] [labels.........] [emblems], mirrored for RTL. */
+    icon_allocation = (GtkAllocation) {
+        ltr ? 0 : width - icon_size, (height - icon_size) / 2,
+        icon_size, icon_size
+    };
+    emblems_allocation = (GtkAllocation) {
+        ltr ? width - emblems_width : 0, 0,
+        emblems_width, height
+    };
+    labels_allocation = (GtkAllocation) {
+        ltr ? icon_size + COMPACT_SPACING : emblems_width, 0,
+        MAX (0, width - icon_size - COMPACT_SPACING - emblems_width), height
+    };
+
+    gtk_widget_size_allocate (self->icon, &icon_allocation, -1);
+    gtk_widget_size_allocate (self->emblems_box, &emblems_allocation, -1);
+    gtk_widget_size_allocate (self->labels_box, &labels_allocation, -1);
+}
 
 static void
 nautilus_grid_cell_measure (GtkWidget      *widget,
@@ -261,6 +332,13 @@ nautilus_grid_cell_measure (GtkWidget      *widget,
     NautilusGridCell *self = NAUTILUS_GRID_CELL (widget);
     guint icon_size;
     int width, child_min, child_nat;
+
+    if (self->compact)
+    {
+        compact_measure (self, orientation, for_size, minimum, natural);
+        *min_baseline = *nat_baseline = -1;
+        return;
+    }
 
     g_object_get (self, "icon-size", &icon_size, NULL);
     width = EMBLEMS_BOX_WIDTH + icon_size + EMBLEMS_BOX_WIDTH;
@@ -351,6 +429,12 @@ nautilus_grid_cell_size_allocate (GtkWidget *widget,
     GtkAllocation child_allocation;
     guint icon_size;
 
+    if (self->compact)
+    {
+        compact_size_allocate (self, width, height);
+        return;
+    }
+
     g_object_get (self, "icon-size", &icon_size, NULL);
 
     /* Put the icon at the top. Center it horizontally, with
@@ -409,18 +493,40 @@ snapshot (GtkWidget   *widget,
         const double dim_opacity = is_high_contrast ? 0.9 : 0.55;
 
         g_object_get (self, "icon-size", &icon_size, NULL);
-        dash_bounds = GRAPHENE_RECT_INIT (EMBLEMS_BOX_WIDTH, 0, icon_size, icon_size);
-        graphene_rect_inset_r (&dash_bounds, 0.2 * icon_size, 0.2 * icon_size, &icon_bounds);
+        if (self->compact)
+        {
+            graphene_rect_t icon_rect;
+
+            if (!gtk_widget_compute_bounds (self->icon, widget, &icon_rect))
+            {
+                graphene_rect_init (&icon_rect, 0, 0, icon_size, icon_size);
+            }
+            dash_bounds = GRAPHENE_RECT_INIT (icon_rect.origin.x, icon_rect.origin.y, icon_size, icon_size);
+        }
+        else
+        {
+            dash_bounds = GRAPHENE_RECT_INIT (EMBLEMS_BOX_WIDTH, 0, icon_size, icon_size);
+        }
         gtk_widget_get_color (widget, &color);
 
-        dashed_border_color = color;
-        dashed_border_color.alpha *= border_opacity;
-        nautilus_ui_draw_icon_dashed_border (snapshot, &dash_bounds, dashed_border_color);
+        /* The compact layout's smallest icon sizes (16, 24) have no dashed
+         * border style, so just draw the cut icon there, like the list view. */
+        if (icon_size >= NAUTILUS_THUMBNAIL_MINIMUM_ICON_SIZE)
+        {
+            graphene_rect_inset_r (&dash_bounds, 0.2 * icon_size, 0.2 * icon_size, &icon_bounds);
+            dashed_border_color = color;
+            dashed_border_color.alpha *= border_opacity;
+            nautilus_ui_draw_icon_dashed_border (snapshot, &dash_bounds, dashed_border_color);
+        }
+        else
+        {
+            icon_bounds = dash_bounds;
+        }
 
         icon_color = color;
         icon_color.alpha *= dim_opacity;
         nautilus_ui_draw_symbolic_icon (snapshot,
-                                        "cut-large-symbolic",
+                                        icon_size <= NAUTILUS_LIST_ICON_SIZE_MEDIUM ? "cut-symbolic" : "cut-large-symbolic",
                                         &icon_bounds,
                                         icon_color,
                                         gtk_widget_get_scale_factor (widget));
@@ -449,6 +555,7 @@ nautilus_grid_cell_class_init (NautilusGridCellClass *klass)
     gtk_widget_class_bind_template_child (widget_class, NautilusGridCell, icon);
     gtk_widget_class_bind_template_child (widget_class, NautilusGridCell, emblems_box);
     gtk_widget_class_bind_template_child (widget_class, NautilusGridCell, labels_box);
+    gtk_widget_class_bind_template_child (widget_class, NautilusGridCell, label);
     gtk_widget_class_bind_template_child (widget_class, NautilusGridCell, first_caption);
     gtk_widget_class_bind_template_child (widget_class, NautilusGridCell, second_caption);
     gtk_widget_class_bind_template_child (widget_class, NautilusGridCell, third_caption);
@@ -504,4 +611,42 @@ nautilus_grid_cell_set_caption_attributes (NautilusGridCell *self,
                                            GQuark           *attrs)
 {
     self->caption_attributes = attrs;
+}
+
+void
+nautilus_grid_cell_set_compact (NautilusGridCell *self,
+                                gboolean          compact)
+{
+    GtkLabel *label = GTK_LABEL (self->label);
+
+    if (self->compact == compact)
+    {
+        return;
+    }
+
+    self->compact = compact;
+
+    /* One line, left-aligned name, like a list row. */
+    gtk_label_set_wrap (label, !compact);
+    gtk_label_set_lines (label, compact ? 1 : 3);
+    gtk_label_set_ellipsize (label, compact ? PANGO_ELLIPSIZE_END : PANGO_ELLIPSIZE_MIDDLE);
+    gtk_label_set_justify (label, compact ? GTK_JUSTIFY_LEFT : GTK_JUSTIFY_CENTER);
+    gtk_label_set_xalign (label, compact ? 0.0 : 0.5);
+    gtk_label_set_max_width_chars (label, compact ? 40 : -1);
+    gtk_widget_set_valign (self->labels_box, compact ? GTK_ALIGN_CENTER : GTK_ALIGN_FILL);
+    gtk_orientable_set_orientation (GTK_ORIENTABLE (self->emblems_box),
+                                    compact ? GTK_ORIENTATION_HORIZONTAL : GTK_ORIENTATION_VERTICAL);
+    gtk_widget_set_valign (self->emblems_box, compact ? GTK_ALIGN_CENTER : GTK_ALIGN_FILL);
+    gtk_widget_set_valign (GTK_WIDGET (self), compact ? GTK_ALIGN_CENTER : GTK_ALIGN_START);
+
+    if (compact)
+    {
+        gtk_widget_add_css_class (GTK_WIDGET (self), "compact");
+    }
+    else
+    {
+        gtk_widget_remove_css_class (GTK_WIDGET (self), "compact");
+    }
+
+    gtk_widget_queue_resize (GTK_WIDGET (self));
 }

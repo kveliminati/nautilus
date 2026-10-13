@@ -15,6 +15,7 @@
 #include "nautilus-view-model.h"
 
 #include <glib/gi18n.h>
+#include <math.h>
 
 struct _NautilusGridView
 {
@@ -23,6 +24,9 @@ struct _NautilusGridView
     GtkGridView *view_ui;
 
     gint zoom_level;
+
+    /* Small icons with names beside them, filled top to bottom in columns. */
+    gboolean compact;
 
     gboolean directories_first;
 
@@ -103,6 +107,44 @@ nautilus_grid_view_setup_directory (NautilusListBase  *list_base,
     NAUTILUS_LIST_BASE_CLASS (nautilus_grid_view_parent_class)->setup_directory (list_base, new_directory);
 
     update_sort_directories_first (self);
+}
+
+static guint
+get_compact_icon_size_for_zoom_level (NautilusGridZoomLevel zoom_level)
+{
+    switch (zoom_level)
+    {
+        case NAUTILUS_GRID_ZOOM_LEVEL_SMALL:
+        {
+            return 16;
+        }
+        break;
+
+        case NAUTILUS_GRID_ZOOM_LEVEL_SMALL_PLUS:
+        {
+            return 24;
+        }
+        break;
+
+        case NAUTILUS_GRID_ZOOM_LEVEL_MEDIUM:
+        {
+            return 32;
+        }
+        break;
+
+        case NAUTILUS_GRID_ZOOM_LEVEL_LARGE:
+        {
+            return 48;
+        }
+        break;
+
+        case NAUTILUS_GRID_ZOOM_LEVEL_EXTRA_LARGE:
+        {
+            return 64;
+        }
+        break;
+    }
+    g_return_val_if_reached (32);
 }
 
 static guint
@@ -326,6 +368,11 @@ real_get_icon_size (NautilusListBase *list_base_view)
 {
     NautilusGridView *self = NAUTILUS_GRID_VIEW (list_base_view);
 
+    if (self->compact)
+    {
+        return get_compact_icon_size_for_zoom_level (self->zoom_level);
+    }
+
     return get_icon_size_for_zoom_level (self->zoom_level);
 }
 
@@ -430,8 +477,17 @@ bind_cell (GtkSignalListItemFactory *factory,
          * that's why we need to complete the widget setup process here, on the
          * first time ::bind is emitted. */
         parent = gtk_widget_get_parent (cell);
-        gtk_widget_set_halign (parent, GTK_ALIGN_CENTER);
-        gtk_widget_set_valign (parent, GTK_ALIGN_START);
+        if (NAUTILUS_GRID_VIEW (user_data)->compact)
+        {
+            /* Fill the column, so all items in it line up and highlight alike. */
+            gtk_widget_set_halign (parent, GTK_ALIGN_FILL);
+            gtk_widget_set_valign (parent, GTK_ALIGN_CENTER);
+        }
+        else
+        {
+            gtk_widget_set_halign (parent, GTK_ALIGN_CENTER);
+            gtk_widget_set_valign (parent, GTK_ALIGN_START);
+        }
     }
 }
 
@@ -470,6 +526,7 @@ setup_cell (GtkSignalListItemFactory *factory,
                             G_BINDING_SYNC_CREATE);
 
     nautilus_grid_cell_set_caption_attributes (cell, self->caption_attributes);
+    nautilus_grid_cell_set_compact (cell, self->compact);
 
     /* Use file display name as accessible label. Explaining in pseudo-code:
      * listitem:accessible-name :- listitem:item:item:file:a11y-name */
@@ -493,18 +550,25 @@ on_model_changed (NautilusGridView *self)
 
     gtk_grid_view_set_model (self->view_ui, GTK_SELECTION_MODEL (model));
 }
-static GtkGridView *
-create_view_ui (NautilusGridView *self)
+static GtkListItemFactory *
+create_factory (NautilusGridView *self)
 {
     GtkListItemFactory *factory;
-    GtkWidget *widget;
 
     factory = gtk_signal_list_item_factory_new ();
     g_signal_connect (factory, "setup", G_CALLBACK (setup_cell), self);
     g_signal_connect (factory, "bind", G_CALLBACK (bind_cell), self);
     g_signal_connect (factory, "unbind", G_CALLBACK (unbind_cell), self);
 
-    widget = gtk_grid_view_new (NULL, factory);
+    return factory;
+}
+
+static GtkGridView *
+create_view_ui (NautilusGridView *self)
+{
+    GtkWidget *widget;
+
+    widget = gtk_grid_view_new (NULL, create_factory (self));
 
     /* We don't use the built-in child activation feature for clicks because it
      * doesn't fill all our needs nor does it match our expected behavior.
@@ -529,6 +593,77 @@ create_view_ui (NautilusGridView *self)
     g_signal_connect (widget, "activate", G_CALLBACK (on_grid_view_item_activated), self);
 
     return GTK_GRID_VIEW (widget);
+}
+
+/* In the compact layout the view only scrolls horizontally, so let the mouse
+ * wheel (and vertical touchpad swipes) move it sideways. */
+static gboolean
+on_compact_scroll (GtkEventControllerScroll *controller,
+                   double                    dx,
+                   double                    dy,
+                   gpointer                  user_data)
+{
+    NautilusGridView *self = NAUTILUS_GRID_VIEW (user_data);
+    GtkWidget *scrolled_window = nautilus_list_base_get_scrolled_window (NAUTILUS_LIST_BASE (self));
+    GtkAdjustment *hadjustment;
+    GdkModifierType state;
+    double delta, page_size;
+
+    state = gtk_event_controller_get_current_event_state (GTK_EVENT_CONTROLLER (controller));
+    if (!self->compact || (state & GDK_CONTROL_MASK) != 0 || dy == 0)
+    {
+        /* Ctrl+scroll is zoom, handled by NautilusListBase. */
+        return GDK_EVENT_PROPAGATE;
+    }
+
+    hadjustment = gtk_scrolled_window_get_hadjustment (GTK_SCROLLED_WINDOW (scrolled_window));
+    page_size = gtk_adjustment_get_page_size (hadjustment);
+    delta = dx + dy;
+    if (gtk_event_controller_scroll_get_unit (controller) == GDK_SCROLL_UNIT_WHEEL)
+    {
+        /* Same step size GtkScrolledWindow uses for a wheel click. */
+        delta *= pow (page_size, 2.0 / 3.0);
+    }
+
+    gtk_adjustment_set_value (hadjustment, gtk_adjustment_get_value (hadjustment) + delta);
+
+    return GDK_EVENT_STOP;
+}
+
+static void
+apply_compact_layout (NautilusGridView *self)
+{
+    GtkWidget *scrolled_window = nautilus_list_base_get_scrolled_window (NAUTILUS_LIST_BASE (self));
+    g_autoptr (GtkListItemFactory) factory = NULL;
+
+    self->compact = g_settings_get_boolean (nautilus_icon_view_preferences,
+                                            NAUTILUS_PREFERENCES_ICON_VIEW_COMPACT_LAYOUT);
+
+    if (self->compact)
+    {
+        gtk_widget_add_css_class (GTK_WIDGET (self), "compact");
+        /* Horizontal orientation fills each column top to bottom, then wraps
+         * into a new column to the right; "max-columns" then caps the rows. */
+        gtk_orientable_set_orientation (GTK_ORIENTABLE (self->view_ui), GTK_ORIENTATION_HORIZONTAL);
+        gtk_grid_view_set_max_columns (self->view_ui, 1000);
+        gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scrolled_window),
+                                        GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+    }
+    else
+    {
+        gtk_widget_remove_css_class (GTK_WIDGET (self), "compact");
+        gtk_orientable_set_orientation (GTK_ORIENTABLE (self->view_ui), GTK_ORIENTATION_VERTICAL);
+        gtk_grid_view_set_max_columns (self->view_ui, 20);
+        gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scrolled_window),
+                                        GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    }
+
+    /* Cells are configured on ::setup, so recreate them for the new layout. */
+    factory = create_factory (self);
+    gtk_grid_view_set_factory (self->view_ui, factory);
+
+    set_captions_from_preferences (self);
+    g_object_notify (G_OBJECT (self), "icon-size");
 }
 
 static void
@@ -570,6 +705,15 @@ nautilus_grid_view_init (NautilusGridView *self)
     self->view_ui = create_view_ui (self);
     nautilus_list_base_setup_gestures (NAUTILUS_LIST_BASE (self));
 
+    {
+        GtkEventController *controller;
+
+        controller = gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
+        gtk_event_controller_set_propagation_phase (controller, GTK_PHASE_CAPTURE);
+        g_signal_connect (controller, "scroll", G_CALLBACK (on_compact_scroll), self);
+        gtk_widget_add_controller (scrolled_window, controller);
+    }
+
     g_signal_connect_swapped (self, "notify::model", G_CALLBACK (on_model_changed), self);
 
     gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled_window),
@@ -578,6 +722,13 @@ nautilus_grid_view_init (NautilusGridView *self)
     g_signal_connect_object (gtk_filechooser_preferences,
                              "changed::" NAUTILUS_PREFERENCES_SORT_DIRECTORIES_FIRST,
                              G_CALLBACK (update_sort_directories_first),
+                             self,
+                             G_CONNECT_SWAPPED);
+
+    apply_compact_layout (self);
+    g_signal_connect_object (nautilus_icon_view_preferences,
+                             "changed::" NAUTILUS_PREFERENCES_ICON_VIEW_COMPACT_LAYOUT,
+                             G_CALLBACK (apply_compact_layout),
                              self,
                              G_CONNECT_SWAPPED);
 

@@ -171,6 +171,19 @@
   border-radius: 12px;
 }
 
+/* Compact grid: list-like rows filled top to bottom in columns. */
+.nautilus-grid-view.compact gridview {
+  padding: 12px;
+  border-spacing: 12px 2px;
+}
+.nautilus-grid-view.compact gridview > child,
+.nautilus-grid-view.compact .nautilus-view-cell {
+  border-radius: 6px;
+}
+.nautilus-grid-view.compact .nautilus-view-cell {
+  padding: 3px 6px;
+}
+
 /* Column view */
 
 /* Setup padding on the list. Horizontal padding must be set on the columnview

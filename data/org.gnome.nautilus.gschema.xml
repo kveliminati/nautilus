@@ -213,6 +213,11 @@
       <default>'medium'</default>
       <summary>Default icon view zoom level</summary>
     </key>
+    <key type="b" name="compact-layout">
+      <default>false</default>
+      <summary>Compact grid layout</summary>
+      <description>If true, the grid view shows a small icon with the name beside it, and fills items top to bottom in columns that scroll horizontally (like the “List” view of other file managers).</description>
+    </key>
   </schema>
 
   <schema path="/org/gnome/nautilus/list-view/" id="org.gnome.nautilus.list-view" gettext-domain="nautilus">
